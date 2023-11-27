@@ -36,7 +36,7 @@ setup(
         "msgpack",
         "ipython",
         "tqdm",
-        "datasets==2.14.3",
+        "datasets==2.15.0",
         "pydantic==2.4.2",
         "gradio",
         "distrax",
