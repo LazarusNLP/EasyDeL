@@ -384,7 +384,7 @@ class CausalLMTrainer:
 
             pbar = tqdm(total=self.max_steps_train)
             i = sharded_train_state_.step.tolist()
-            losses = []
+            losses, losses_eval = [], []
             accuracies = []
             pbar.update(sharded_train_state_.step.tolist())
             learning_rates = []
@@ -465,6 +465,7 @@ class CausalLMTrainer:
                         for i in self.arguments.ids_to_pop_from_dataset:
                             _ = batch_eval.pop(i, None)
                         loss_eval, accuracy = fsdp_eval_step(sharded_train_state_, batch_eval)
+                        losses_eval.append(loss_eval)
                         pbar_eval.update(1)
                         if self.arguments.use_wandb:
                             self.wandb_runtime.log(
@@ -472,6 +473,7 @@ class CausalLMTrainer:
                                  'accuracy': accuracy.tolist()}
                             )
                         pbar_eval.set_postfix(loss_eval=loss_eval.tolist())
+                    print(f'Eval Loss: {sum(losses_eval) / len(losses_eval)}')
             if self.arguments.save_steps is None and self.arguments.do_last_save:
                 filename = f'{self.arguments.model_name}-{sum(losses) / len(losses)}-{i}'
                 print(f'Saving Model to \033[1;30m{filename}\033[1;0m')
