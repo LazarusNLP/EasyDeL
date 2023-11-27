@@ -400,7 +400,7 @@ class CausalLMTrainer:
                 for ep in range(self.arguments.num_train_epochs):
                     for batch in self.dataloader_train:
                         i += 1
-                        if i < self.max_steps_train:
+                        if i <= self.max_steps_train:
 
                             batch['labels'] = batch['input_ids'][..., 1:]
 
