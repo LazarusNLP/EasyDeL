@@ -224,14 +224,14 @@ class CausalLMTrainer:
             return rs
 
         dataloader_train = DataLoader(self.dataset_train, collate_fn=collate_fn,
-                                      batch_size=self.arguments.total_batch_size, drop_last=True)
+                                      batch_size=self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps, drop_last=True)
         max_steps_train = self.arguments.num_train_epochs * len(
-            dataloader_train) if self.arguments.max_steps is None else self.arguments.max_steps
+            dataloader_train) // self.arguments.gradient_accumulation_steps if self.arguments.max_steps is None else self.arguments.max_steps
         if self.dataset_eval is not None and self.arguments.do_eval:
             dataloader_eval = DataLoader(self.dataset_eval, collate_fn=collate_fn,
-                                         batch_size=self.arguments.total_batch_size, drop_last=True)
+                                         batch_size=self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps, drop_last=True)
             max_steps_eval = len(
-                dataloader_eval) if self.arguments.max_steps is None else self.arguments.max_steps
+                dataloader_eval) // self.arguments.gradient_accumulation_steps if self.arguments.max_steps is None else self.arguments.max_steps
         else:
             dataloader_eval, max_steps_eval = None, 0
         return dataloader_train, max_steps_train, dataloader_eval, max_steps_eval
