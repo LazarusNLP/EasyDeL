@@ -20,6 +20,38 @@ ACT2FN = {
 }
 
 
+def canonicalize_dtype(
+        *args, dtype: Optional[chex.ArrayDType] = None, inexact: bool = True
+) -> chex.ArrayDType:
+    """Canonicalize an optional dtype to the definitive dtype.
+
+    If the ``dtype`` is None this function will infer the dtype. If it is not
+    None it will be returned unmodified or an exceptions is raised if the dtype
+    is invalid.
+    from the input arguments using ``jnp.result_type``.
+
+    Args:
+      *args: JAX array compatible values. None values
+        are ignored.
+      dtype: Optional dtype override. If specified the arguments are cast to
+        the specified dtype instead and dtype inference is disabled.
+      inexact: When True, the output dtype must be a subdtype
+      of `jnp.inexact`. Inexact dtypes are real or complex floating points. This
+      is useful when you want to apply operations that don't work directly on
+      integers like taking a mean for example.
+    Returns:
+      The dtype that *args should be cast to.
+    """
+    if dtype is None:
+        args_filtered = [jax.numpy.asarray(x) for x in args if x is not None]
+        dtype = jax.numpy.result_type(*args_filtered)
+        if inexact and not jax.numpy.issubdtype(dtype, jax.numpy.inexact):
+            dtype = jax.numpy.promote_types(jax.numpy.float32, dtype)
+    if inexact and not jax.numpy.issubdtype(dtype, jax.numpy.inexact):
+        raise ValueError(f'Dtype must be inexact: {dtype}')
+    return dtype
+
+
 def get_names_from_partition_spec(partition_specs):
     """
     The get_names_from_partition_spec function takes a partition_specs argument, which is either a dictionary or list.
@@ -244,7 +276,7 @@ def smart_flash_attention(
         q_ps: jax.sharding.PartitionSpec,
         k_ps: jax.sharding.PartitionSpec,
         v_ps: jax.sharding.PartitionSpec,
-        o_ps: jax.sharding.PartitionSpec,
+        b_ps: jax.sharding.PartitionSpec,
         a_ps: jax.sharding.PartitionSpec,
         block_k: int,
         block_q: int,
@@ -283,7 +315,7 @@ def smart_flash_attention(
 
     :param v_ps: jax.sharding.PartitionSpec: Specify the partitioning of the value tensor
 
-    :param o_ps: jax.sharding.PartitionSpec: Specify the output partition spec
+    :param b_ps: jax.sharding.PartitionSpec: Specify the Attention Bias partition spec
 
     :param a_ps: jax.sharding.PartitionSpec: Specify the partitioning of the attention weights
 
@@ -380,12 +412,13 @@ def smart_flash_attention(
                 q_ps,
                 k_ps,
                 v_ps,
-                o_ps
+                b_ps
             ),
             out_specs=a_ps,
             check_rep=False
         )
         attn_output = ring_attention_sharded(q, k, v, bias)
+        attn_output = with_sharding_constraint(attn_output, a_ps)
     else:
         if force_float32_tpu or f32_upcast:
             q, k, v = map(lambda x: x.astype(jax.numpy.float32), [q, k, v])
@@ -405,6 +438,7 @@ def smart_flash_attention(
             ),
             debug=False,
         )
+
     attn_output = attn_output.astype(dtype)
     return attn_output
 
@@ -438,7 +472,7 @@ class JaxBaseClassModel:
     :param q_ps: jax.sharding.PartitionSpec: Specify the partitioning of the query tensor
     :param k_ps: jax.sharding.PartitionSpec: Partition the key matrix
     :param v_ps: jax.sharding.PartitionSpec: Specify the partitioning of the value tensor
-    :param o_ps: jax.sharding.PartitionSpec: Specify the output partition spec
+    :param b_ps: jax.sharding.PartitionSpec: Specify the Attention Bias partition spec
     :param a_ps: jax.sharding.PartitionSpec: Specify the partitioning of the attention weights
     :param backend: Optional[None]: Specify the backend to use
     """
@@ -450,7 +484,7 @@ class JaxBaseClassModel:
             q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
             k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
             v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            o_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), None, "mp", None),
+            b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec("dp", None, ("dp", "fsdp"), None),
             a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
             backend: Optional[None] = None
     ):
@@ -465,7 +499,7 @@ class JaxBaseClassModel:
         :param q_ps: jax.sharding.PartitionSpec: Specify the partitioning of the query tensor
         :param k_ps: jax.sharding.PartitionSpec: Partition the key matrix
         :param v_ps: jax.sharding.PartitionSpec: Specify the partitioning of the value tensor
-        :param o_ps: jax.sharding.PartitionSpec: Specify the output partition spec
+        :param b_ps: jax.sharding.PartitionSpec: Specify the Attention Bias partition spec
         :param a_ps: jax.sharding.PartitionSpec: Specify the partitioning of the attention weights
         :param backend: Optional[None]: Specify the backend to use
         :return: A new instance of the class
@@ -474,7 +508,7 @@ class JaxBaseClassModel:
         self.q_ps = q_ps
         self.k_ps = k_ps
         self.v_ps = v_ps
-        self.o_ps = o_ps
+        self.b_ps = b_ps
         self.a_ps = a_ps
         self.axis_dims = axis_dims
         self.axis_names = axis_names
@@ -537,6 +571,26 @@ class JaxBaseClassModel:
 
         """
         return get_flash_attention()
+
+    def add_pss(
+            self,
+            axis_dims: Sequence[int] = (1, -1, 1, 1),
+            axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
+            q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+            k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+            v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+            b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), None, "tp", None),
+            a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+            backend: Optional[str] = None,
+    ):
+        self.axis_dims = axis_dims
+        self.axis_names = axis_names
+        self.q_ps = q_ps
+        self.k_ps = k_ps
+        self.v_ps = v_ps
+        self.b_ps = b_ps
+        self.a_ps = a_ps
+        self.backend = backend
 
 
 def add_start_docstrings(*docstr):

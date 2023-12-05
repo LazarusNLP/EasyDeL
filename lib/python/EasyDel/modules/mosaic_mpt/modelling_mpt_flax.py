@@ -12,7 +12,7 @@ from transformers.modeling_flax_outputs import FlaxCausalLMOutput, FlaxBaseModel
 import flax
 from einops import rearrange
 from fjformer.attention import efficient_attention
-from EasyDel.modules.flax_modelling_utils import (
+from ..flax_modelling_utils import (
     get_gradient_checkpoint_policy,
     with_sharding_constraint,
     ACT2FN,
@@ -184,10 +184,22 @@ class MptConfig(PretrainedConfig, JaxBaseClassModel):
                      bits: Optional[int] = None,
                      axis_dims: Sequence[int] = (1, -1, 1, 1),
                      axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
-                     **kwargs
+                     q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec("dp", None, ("dp", "fsdp"), None),
+                     a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     backend: Optional[str] = None,
+                     **kwargs,
                      ):
         self.axis_names = axis_names
         self.axis_dims = axis_dims
+        self.q_ps = q_ps
+        self.k_ps = k_ps
+        self.v_ps = v_ps
+        self.b_ps = b_ps
+        self.a_ps = a_ps
+        self.backend = backend
         if hasattr(self, 'attn_config'):
             for k, v in self.attn_config.items():
                 setattr(self, k, v)
@@ -376,7 +388,7 @@ class FlaxMptAttention(nn.Module):
         :param attn_bias: chex.Array: Add a bias to the attention scores
         :param init_cache: bool: Initialize the cache
         :return: The output of the attention layer
-        :doc-author: Trelent
+        
         """
         inp_shape = hidden_states.shape
         b, s, ds = inp_shape

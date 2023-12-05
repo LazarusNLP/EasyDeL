@@ -8,6 +8,7 @@ rewritten for mojo as well.
 Some of the key features provided by EasyDeL include:
 
 - Support for 8, 6, and 4 BIT inference and training in JAX
+- Wide Range of models in Jax are supported which have never been implemented before such as _falcon_ 
 - Integration of flashAttention in JAX for GPUs and TPUs
 - Automatic serving of LLMs with mid and high-level APIs in both JAX and PyTorch
 - LLM Trainer and fine-tuner in JAX
@@ -21,7 +22,7 @@ Some of the key features provided by EasyDeL include:
 ## Documentation 💫
 
 > [!IMPORTANT]
-> Documents and Examples are ready at [Here](https://erfanzar.github.io/EasyDeL/docs)
+> Documents and Examples are ready at [Here](https://erfanzar.github.io/EasyDeL)
 > Please have that in mind that EasyDel is in the loop of fast-development
 > so we might have API changes
 
@@ -119,8 +120,9 @@ print(f'Hey ! , here\'s where your model saved {output.last_save_file_name}')
 
 ```
 
-you can then convert it to pytorch for better use I don't recommend jax/flax for hosting models since
-pytorch is better option for gpus
+> [!TIP]
+> you can then convert it to pytorch for better use I don't recommend jax/flax for hosting models since
+> pytorch is better option for gpus
 
 ## LLMServe
 

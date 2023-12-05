@@ -16,7 +16,7 @@ from transformers import PretrainedConfig, FlaxPreTrainedModel
 from flax.linen import partitioning as nn_partitioning, combine_masks
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
 
-from EasyDel.modules.flax_modelling_utils import (
+from ..flax_modelling_utils import (
     ACT2FN,
     with_sharding_constraint,
     get_gradient_checkpoint_policy,
@@ -52,7 +52,7 @@ class MistralConfig(PretrainedConfig, JaxBaseClassModel):
             rope_theta=10000.0,
             sliding_window=4096,
             gradient_checkpointing: str = 'nothing_saveable',
-            use_pjit_attention_force: bool = True,
+            use_pjit_attention_force: bool = False,
             use_flash_attention: bool = False,
             use_sacn_mlp: bool = False,
             flash_attn_query_chunk_size: int = 1024,
@@ -202,7 +202,7 @@ class MistralConfig(PretrainedConfig, JaxBaseClassModel):
 
     def add_jax_args(self,
                      gradient_checkpointing: str = 'nothing_saveable',
-                     use_pjit_attention_force: bool = True,
+                     use_pjit_attention_force: bool = False,
                      use_flash_attention: bool = False,
                      use_sacn_mlp: bool = False,
                      flash_attn_query_chunk_size: int = 1024,
@@ -215,6 +215,13 @@ class MistralConfig(PretrainedConfig, JaxBaseClassModel):
                      bits: Optional[int] = None,
                      axis_dims: Sequence[int] = (1, -1, 1, 1),
                      axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
+                     q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), None, "tp", None),
+                     a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     backend: Optional[str] = None,
+                     **kwargs,
                      ):
         """
         The add_jax_args function adds the following arguments to the model:
@@ -234,9 +241,14 @@ class MistralConfig(PretrainedConfig, JaxBaseClassModel):
         :param bits: Optional[int]: Specify the number of bits to use for quantization
         :param axis_dims: Sequence[int]: Specify the dimensions of each axis in the tensor
         :param axis_names: Sequence[str]: Name the axes of the tensors
-        :param &quot;fsdp&quot;: Control the number of frequency bins in the spectrogram
-        :param &quot;tp&quot;: Determine the number of time steps in a sequence
-        :param &quot;mp&quot;): Specify the number of heads in the multi-head attention
+        :param axis_dims: Sequence[int]: Specify the dimension of each axis
+        :param axis_names: Sequence[str]: Name the axes of the tensor
+        :param q_ps: jax.sharding.PartitionSpec: Specify the partitioning of the query tensor
+        :param k_ps: jax.sharding.PartitionSpec: Partition the key matrix
+        :param v_ps: jax.sharding.PartitionSpec: Specify the partitioning of the value tensor
+        :param b_ps: jax.sharding.PartitionSpec: Specify the Attention Bias partition spec
+        :param a_ps: jax.sharding.PartitionSpec: Specify the partitioning of the attention weights
+        :param backend: typing.Optional[str]: backend to use for model
         :param : Enable gradient checkpointing
         :return: A tuple of the following:
         
@@ -253,8 +265,14 @@ class MistralConfig(PretrainedConfig, JaxBaseClassModel):
         self.c_max_position_embeddings = c_max_position_embeddings
         self.freq_max_position_embeddings = freq_max_position_embeddings
         self.bits = bits
-        self.axis_dims = axis_dims
         self.axis_names = axis_names
+        self.axis_dims = axis_dims
+        self.q_ps = q_ps
+        self.k_ps = k_ps
+        self.v_ps = v_ps
+        self.b_ps = b_ps
+        self.a_ps = a_ps
+        self.backend = backend
 
     @staticmethod
     def get_weight_decay_exclusions():
@@ -539,7 +557,7 @@ class FlaxMistralAttention(nn.Module):
                 q_ps=self.config.q_ps,
                 k_ps=self.config.k_ps,
                 v_ps=self.config.v_ps,
-                o_ps=self.config.o_ps,
+                b_ps=self.config.b_ps,
                 a_ps=self.config.a_ps,
                 bias=attention_bias,
                 block_q=self.config.flash_attn_query_chunk_size,
@@ -589,7 +607,7 @@ class FlaxMistralAttention(nn.Module):
                     self.config.q_ps,
                     self.config.k_ps,
                     self.config.v_ps,
-                    self.config.o_ps
+                    self.config.b_ps
                 ),
                 out_specs=self.config.a_ps,
                 check_rep=False
@@ -598,6 +616,7 @@ class FlaxMistralAttention(nn.Module):
             attn_output = ring_attention_sharded(
                 query, key, value, attention_mask
             )
+            attn_output = with_sharding_constraint(attn_output, self.config.a_ps)
 
         out = self.o_proj(attn_output.reshape(batch_size, sequence_length, self.hidden_size))
         outputs = (out, attn_output) if output_attentions else (out,)

@@ -26,7 +26,6 @@ from ..flax_modelling_utils import (
     JaxBaseClassModel,
     smart_flash_attention
 )
-from transformers import LlamaForCausalLM
 import chex
 from fjformer.bits import config as q_config, q_flax
 
@@ -52,11 +51,13 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
             resid_pdrop: float = 0.0,
             embd_pdrop: float = 0.0,
             attn_pdrop: float = 0.0,
+            rope_theta: float = 10000.,
+            attention_bias: bool = False,
             tie_word_embeddings: bool = False,
             gradient_checkpointing: str = "nothing_saveable",
             fcm_min_ratio: float = -1,
             fcm_max_ratio: float = -1,
-            use_pjit_attention_force: bool = True,
+            use_pjit_attention_force: bool = False,
             rope_scaling: Dict[str, Union[str, float]] = None,
             use_flash_attention: bool = False,
             use_sacn_mlp: bool = False,
@@ -64,9 +65,12 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
             flash_attn_key_chunk_size: int = 1024,
             scan_mlp_chunk_size: int = 1024,
             bits: Optional[int] = None,
+            hidden_act: str = 'silu',
+            pretraining_tp: int = 1,
             axis_dims: Sequence[int] = (1, -1, 1, 1),
             axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
             scan_layers: bool = True,
+            use_shard_map: bool = True,
             **kwargs,
     ):
         """
@@ -95,6 +99,7 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
         :param gradient_checkpointing: str: Specify how to checkpoint the gradients
         :param fcm_min_ratio: float: Set the minimum ratio of the number of elements in a tensor to be processed by flash
         :param fcm_max_ratio: float: Determine the maximum ratio of
+        :param use_shard_map: bool: whenever to use shard map for attention
         :param use_pjit_attention_force: bool: Determine whether to use the pytorch jit compiler
         :param rope_scaling: Dict[str: Define the scaling of the rope
         :param Union[str: Specify the type of the parameter
@@ -105,16 +110,16 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
         :param flash_attn_key_chunk_size: int: Determine the chunk size of the key tensor
         :param scan_mlp_chunk_size: int: Specify the chunk size of the scan_mlp
         :param bits: Optional[int]: Specify the number of bits used to quantize the weights
+        :param rope_theta: float : rope_theta for compute rope
+        :param attention_bias: bool : whenever to use attention bias or no
+        :param hidden_act: str : hidden_act for mlp
         :param axis_dims: Sequence[int]: Specify the dimensions of each axis
         :param axis_names: Sequence[str]: Specify the names of the axes in a tensor
-        :param &quot;fsdp&quot;: Determine the number of chunks that will be used to split the input sequence
-        :param &quot;tp&quot;: Control the number of tokens in a sequence
-        :param &quot;mp&quot;): Set the number of attention heads
         :param scan_layers: bool: Determine whether to use the scan_layers or not
         :param **kwargs: Pass a variable number of keyword arguments to a function
         :param : Define the number of layers in the model
         :return: Nothing
-        
+
         """
         num_key_value_heads = num_key_value_heads or number_rep_kv * num_attention_heads
         self.num_key_value_heads = num_key_value_heads
@@ -125,17 +130,21 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
         self.initializer_range = initializer_range
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
-
+        self.rope_theta = rope_theta
+        self.attention_bias = attention_bias
         self.num_attention_heads = num_attention_heads
         self.max_position_embeddings = max_position_embeddings
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
+        self.pretraining_tp = pretraining_tp
         self.resid_pdrop = resid_pdrop
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop
         self.gradient_checkpointing = gradient_checkpointing
         self.use_pjit_attention_force = use_pjit_attention_force
         self.fcm_min_ratio = fcm_min_ratio
+        self.hidden_act = hidden_act
+        self.use_shard_map = use_shard_map
         self.fcm_max_ratio = fcm_max_ratio
         self.rope_scaling = rope_scaling
         self.use_flash_attention = use_flash_attention
@@ -165,7 +174,7 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
 
         :param fully_fsdp: bool: Determine whether to partition the model fully or not
         :return: A list of tuples
-        
+
         """
         return (
 
@@ -211,17 +220,28 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
                      gradient_checkpointing: str = 'nothing_saveable',
                      fcm_min_ratio: float = 0.0,
                      fcm_max_ratio: float = 0.0,
-                     use_pjit_attention_force: bool = True,
+                     use_pjit_attention_force: bool = False,
                      use_flash_attention: bool = False,
                      use_sacn_mlp: bool = False,
+                     use_shard_map: bool = True,
                      flash_attn_query_chunk_size: int = 1024,
                      flash_attn_key_chunk_size: int = 1024,
                      scan_mlp_chunk_size: int = 1024,
                      number_rep_kv: int = 1,
                      bits: Optional[int] = None,
+                     rope_theta: float = 10000.,
+                     attention_bias: bool = False,
+                     hidden_act: str = 'silu',
                      axis_dims: Sequence[int] = (1, -1, 1, 1),
                      axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
-                     scan_layers: bool = True
+                     q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), None, "mp", None),
+                     a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     backend: Optional[str] = None,
+                     scan_layers: bool = True,
+                     **kwargs,
                      ):
         """
         The add_jax_args function adds the following arguments to the Transformer class:
@@ -232,6 +252,7 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
         :param attn_pdrop: float: Set the probability of dropping out the attention layer
         :param tie_word_embeddings: bool: Tie the word embeddings to the decoder
         :param gradient_checkpointing: str: Control the amount of memory used by jax
+        :param use_shard_map: bool: whenever to use shard map for attention
         :param fcm_min_ratio: float: Control the minimum ratio of the number of chunks to be used in flash-based computation
         :param fcm_max_ratio: float: Set the maximum ratio of the number of input tokens to output tokens
         :param use_pjit_attention_force: bool: Determine if the attention force is used
@@ -242,24 +263,41 @@ class LlamaConfig(PretrainedConfig, JaxBaseClassModel):
         :param scan_mlp_chunk_size: int: Set the chunk size for scan_mlp
         :param number_rep_kv: int: Determine how many times the key and value vectors are repeated
         :param bits: Optional[int]: Determine the number of bits used in the quantization
+        :param rope_theta: float : rope_theta for compute rope
+        :param attention_bias: bool : whenever to use attention bias or no
+        :param hidden_act: str : hidden_act for mlp
         :param axis_dims: Sequence[int]: Specify the dimension of each axis
         :param axis_names: Sequence[str]: Name the axes of the tensor
-        :param &quot;fsdp&quot;: Determine the number of layers in the model
-        :param &quot;tp&quot;: Determine the number of heads in the attention layer
-        :param &quot;mp&quot;): Specify the number of multi-head attention layers
+        :param q_ps: jax.sharding.PartitionSpec: Specify the partitioning of the query tensor
+        :param k_ps: jax.sharding.PartitionSpec: Partition the key matrix
+        :param v_ps: jax.sharding.PartitionSpec: Specify the partitioning of the value tensor
+        :param b_ps: jax.sharding.PartitionSpec: Specify the Attention Bias partition spec
+        :param a_ps: jax.sharding.PartitionSpec: Specify the partitioning of the attention weights
+        :param backend: typing.Optional[str]: backend to use for model
         :param scan_layers: bool: Determine whether to use scan layers or not
         :return: The following:
-        
+
         """
+        self.axis_names = axis_names
+        self.axis_dims = axis_dims
+        self.q_ps = q_ps
+        self.k_ps = k_ps
+        self.v_ps = v_ps
+        self.b_ps = b_ps
+        self.a_ps = a_ps
+        self.backend = backend
         self.scan_layers = scan_layers
         self.axis_names = axis_names
+        self.use_shard_map = use_shard_map
         self.axis_dims = axis_dims
         self.use_flash_attention = use_flash_attention
         self.embd_pdrop = embd_pdrop
         self.number_rep_kv = number_rep_kv
         self.resid_pdrop = resid_pdrop
-
+        self.rope_theta = rope_theta
+        self.attention_bias = attention_bias
         self.attn_pdrop = attn_pdrop
+        self.hidden_act = hidden_act
         self.tie_word_embeddings = tie_word_embeddings
         self.gradient_checkpointing = gradient_checkpointing
         self.fcm_min_ratio = fcm_min_ratio
@@ -360,7 +398,7 @@ class FlaxLlamaAttention(nn.Module):
             config.num_attention_heads * self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
-            use_bias=False,
+            use_bias=self.config.attention_bias,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             precision=self.precision,
             dot_general=dot_general_cls
@@ -369,7 +407,7 @@ class FlaxLlamaAttention(nn.Module):
             config.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
-            use_bias=False,
+            use_bias=self.config.attention_bias,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             precision=self.precision,
             dot_general=dot_general_cls
@@ -378,7 +416,7 @@ class FlaxLlamaAttention(nn.Module):
             config.num_key_value_heads * self.head_dim,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
-            use_bias=False,
+            use_bias=self.config.attention_bias,
             kernel_init=jax.nn.initializers.normal(self.config.initializer_range),
             precision=self.precision,
             dot_general=dot_general_cls
@@ -521,6 +559,7 @@ class FlaxLlamaAttention(nn.Module):
             query_state = with_sharding_constraint(query_state, PS(("dp", "fsdp"), "mp", "tp"))
             key_state = with_sharding_constraint(key_state, PS(("dp", "fsdp"), "mp", "tp"))
             value_state = with_sharding_constraint(value_state, PS(("dp", "fsdp"), "mp", "tp"))
+
         query_state = query_state.reshape(batch_size, sequence_length, self.config.num_attention_heads, self.head_dim)
         key_state = key_state.reshape(batch_size, sequence_length, self.config.num_key_value_heads, self.head_dim)
         value_state = value_state.reshape(batch_size, sequence_length, self.config.num_key_value_heads, self.head_dim)
@@ -534,6 +573,16 @@ class FlaxLlamaAttention(nn.Module):
             batch_size=batch_size,
             sequence_length=sequence_length
         )
+
+        assert_msg = (
+            "num_attention_heads repeat wont work likely\n"
+            f"INFO :\n\trepeat_kv_bnsh Used with number_of_reps = {self.number_of_reps}\n\t"
+            f"NH : {self.config.num_attention_heads} KVH : {self.config.num_attention_heads}"
+        )
+
+        assert query_state.shape[-2] == self.config.num_attention_heads, assert_msg
+        assert key_state.shape[-2] == self.config.num_attention_heads, assert_msg
+        assert value_state.shape[-2] == self.config.num_attention_heads, assert_msg
 
         query_length, key_length = query_state.shape[1], key_state.shape[1]
 
@@ -579,7 +628,7 @@ class FlaxLlamaAttention(nn.Module):
                 q_ps=self.config.q_ps,
                 k_ps=self.config.k_ps,
                 v_ps=self.config.v_ps,
-                o_ps=self.config.o_ps,
+                b_ps=self.config.b_ps,
                 a_ps=self.config.a_ps,
                 bias=attention_bias,
                 block_q=self.config.flash_attn_query_chunk_size,
@@ -622,23 +671,27 @@ class FlaxLlamaAttention(nn.Module):
                                                                                     attention_mask)
 
             attn_weights = None
-            ring_attention_sharded = shard_map(
-                partial(fjformer.attention.ring_attention_standard, axis_name="mp"),
-                mesh=self.config.jax_mesh(),
-                in_specs=(
-                    self.config.q_ps,
-                    self.config.k_ps,
-                    self.config.v_ps,
-                    self.config.o_ps
-                ),
-                out_specs=self.config.a_ps,
-                check_rep=False
-            )
+            if self.config.use_shard_map:
+                ring_attention_sharded = shard_map(
+                    partial(fjformer.attention.ring_attention_standard, axis_name="mp"),
+                    mesh=self.config.jax_mesh(),
+                    in_specs=(
+                        self.config.q_ps,
+                        self.config.k_ps,
+                        self.config.v_ps,
+                        self.config.b_ps
+                    ),
+                    out_specs=self.config.a_ps,
+                    check_rep=False
+                )
 
-            attn_output = ring_attention_sharded(
-                query_state, key_state, value_state, attention_mask
-            )
-
+                attn_output = ring_attention_sharded(
+                    query_state, key_state, value_state, attention_mask
+                )
+            else:
+                attn_output = partial(fjformer.attention.ring_attention_standard, axis_name="mp")(
+                    query_state, key_state, value_state, attention_mask
+                )
         attn_output = self._merge_heads(attn_output)
         attn_output = self.o_proj(attn_output)
 
@@ -867,7 +920,6 @@ class FlaxLlamaPreTrainedModel(FlaxPreTrainedModel):
         :param self: Refer to the object itself
         :param config: LlamaConfig: Pass the configuration to the module
         :param input_shape: Tuple: Specify the shape of the input to the model
-        :param 1): Pass the config to the module
         :param seed: int: Set the seed for random number generation
         :param dtype: jnp.dtype: Specify the data type of the input
         :param _do_init: bool: Control whether the module is initialized or not
@@ -1054,8 +1106,13 @@ class FlaxLlamaBlockCollection(nn.Module):
 
     def setup(self):
         self.blocks = [
-            FlaxLlamaBlock(self.config, name=str(i), dtype=self.dtype, param_dtype=self.param_dtype,
-                           precision=self.precision)
+            FlaxLlamaBlock(
+                self.config,
+                name=str(i),
+                dtype=self.dtype,
+                param_dtype=self.param_dtype,
+                precision=self.precision
+            )
             for i in range(self.config.num_hidden_layers)
         ]
 

@@ -9,7 +9,7 @@ from jax import numpy as jnp, lax
 import jax
 from jax.sharding import PartitionSpec
 from transformers.modeling_flax_outputs import FlaxCausalLMOutput, FlaxBaseModelOutput
-from EasyDel.modules.flax_modelling_utils import get_gradient_checkpoint_policy, \
+from ..flax_modelling_utils import get_gradient_checkpoint_policy, \
     with_sharding_constraint, JaxBaseClassModel
 import chex
 from fjformer.func import transpose
@@ -152,10 +152,22 @@ class FalconConfig(PretrainedConfig, JaxBaseClassModel):
                      bits: Optional[int] = None,
                      axis_dims: Sequence[int] = (1, -1, 1, 1),
                      axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
+                     q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec("dp", None, ("dp", "fsdp"), None),
+                     a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
+                     backend: Optional[str] = None,
                      **kwargs,
                      ):
         self.axis_names = axis_names
         self.axis_dims = axis_dims
+        self.q_ps = q_ps
+        self.k_ps = k_ps
+        self.v_ps = v_ps
+        self.b_ps = b_ps
+        self.a_ps = a_ps
+        self.backend = backend
         basics = dict(
             bits=bits,
             vocab_size=vocab_size,
@@ -190,7 +202,6 @@ class FalconConfig(PretrainedConfig, JaxBaseClassModel):
 
 
 def built_bloom_alibi(attention_mask, num_attention_heads):
-
     """
     The built_bloom_alibi function is used to create a bloom alibi for the attention mask.
     The bloom alibi is used in the Bloom Attention layer to ensure that each token has a unique
@@ -200,7 +211,7 @@ def built_bloom_alibi(attention_mask, num_attention_heads):
     :param attention_mask: Mask out the padding tokens in the input sequence
     :param num_attention_heads: Determine the number of attention heads in the model
     :return: A tensor of shape (batch_size, num_attention_heads, 1, sequence_length)
-    :doc-author: Trelent
+    
     """
     batch_size, sequence_length = attention_mask.shape
     cp2 = 2 ** math.floor(math.log2(num_attention_heads))
@@ -222,7 +233,6 @@ def built_bloom_alibi(attention_mask, num_attention_heads):
 
 
 def precompute_falcon_freq_cis(max_position_embedding: int, head_dim: int, theta: float = 10000):
-
     """
     The precompute_falcon_freq_cis function is used to precompute the sinusoidal frequencies for the FALCON model.
     The function takes in three arguments: max_position_embedding, head_dim, and theta. The first two are self-explanatory;
@@ -234,7 +244,7 @@ def precompute_falcon_freq_cis(max_position_embedding: int, head_dim: int, theta
     :param head_dim: int: Determine the size of the positional embedding
     :param theta: float: Adjust the frequency of the sinusoid
     :return: A tuple of two arrays
-    :doc-author: Trelent
+    
     """
     inv_freq_cis = 1.0 / (theta ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim))
     freq = jnp.einsum("i , j -> i j", jnp.arange(max_position_embedding), inv_freq_cis).astype("float32")
@@ -244,7 +254,6 @@ def precompute_falcon_freq_cis(max_position_embedding: int, head_dim: int, theta
 
 
 def _rotate_half(x):
-
     """
     The _rotate_half function takes a 1D array and rotates it by half its length.
     For example, if the input is [0, 1, 2, 3], then the output will be [-2,-3,-0,-4].
@@ -253,13 +262,12 @@ def _rotate_half(x):
 
     :param x: Specify the input array
     :return: The negative of the second half of x concatenated with the first half
-    :doc-author: Trelent
+    
     """
     return jnp.concatenate((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), axis=-1)
 
 
 def apply_rotary_pos_embedding(tensor, sin_, cos_):
-
     """
     The apply_rotary_pos_embedding function applies a rotary positional embedding to the input tensor.
 
@@ -267,13 +275,12 @@ def apply_rotary_pos_embedding(tensor, sin_, cos_):
     :param sin_: Rotate the tensor by half of its length
     :param cos_: Multiply the tensor and cosine of the angle
     :return: A tensor with the same shape as its input,
-    :doc-author: Trelent
+    
     """
     return (tensor * cos_) + (_rotate_half(tensor) * sin_)
 
 
 def dropout_add(linen_drop: nn.Dropout, x: chex.Array, residual: chex.Array, deterministic: bool) -> chex.Array:
-
     """
     The dropout_add function is a helper function that adds the residual to the output of
     the dropout layer. This is necessary because we want to use deterministic=True when
@@ -286,7 +293,7 @@ def dropout_add(linen_drop: nn.Dropout, x: chex.Array, residual: chex.Array, det
     :param residual: chex.Array: Add the residual to the output of dropout_add
     :param deterministic: bool: Determine whether the dropout layer is active or not
     :return: A tensor that is the sum of the residual and a dropout layer
-    :doc-author: Trelent
+    
     """
     out = linen_drop(inputs=x, deterministic=deterministic)
     out = residual + out
