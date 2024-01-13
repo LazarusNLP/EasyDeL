@@ -30,30 +30,30 @@ def get_partitions(
     """
     if jax_attn_format:
         if fsdp_on_batch:
-            q_ps = PartitionSpec(("dp", "fsdp"), None, "mp", "tp")
-            k_ps = PartitionSpec(("dp", "fsdp"), None, "mp", "tp")
-            v_ps = PartitionSpec(("dp", "fsdp"), None, "mp", "tp")
-            b_ps = PartitionSpec(("dp", "fsdp"), None, "mp", None)
-            a_ps = PartitionSpec(("dp", "fsdp"), None, "mp", "tp")
+            q_ps = PartitionSpec("fsdp", None, "sp", None)
+            k_ps = PartitionSpec("fsdp", None, "sp", None)
+            v_ps = PartitionSpec("fsdp", None, "sp", None)
+            b_ps = PartitionSpec("fsdp", None, "sp", None)
+            a_ps = PartitionSpec("fsdp", None, "sp", None)
         else:
-            q_ps = PartitionSpec("dp", "fsdp", "mp", "tp")
-            k_ps = PartitionSpec("dp", "fsdp", "mp", "tp")
-            v_ps = PartitionSpec("dp", "fsdp", "mp", "tp")
+            q_ps = PartitionSpec("dp", "fsdp", "tp", "sp", None)
+            k_ps = PartitionSpec("dp", "fsdp", "tp", "sp", None)
+            v_ps = PartitionSpec("dp", "fsdp", "tp", "sp", None)
             b_ps = PartitionSpec("dp", None, "fsdp", None)
-            a_ps = PartitionSpec("dp", "fsdp", "mp", "tp")
+            a_ps = PartitionSpec("dp", "fsdp", "tp", "sp", None)
     else:
         if fsdp_on_batch:
-            q_ps = PartitionSpec(("dp", "fsdp"), "mp", None, "tp")
-            k_ps = PartitionSpec(("dp", "fsdp"), "mp", None, "tp")
-            v_ps = PartitionSpec(("dp", "fsdp"), "mp", None, "tp")
-            b_ps = PartitionSpec(("dp", "fsdp"), "mp", None, None)
-            a_ps = PartitionSpec(("dp", "fsdp"), "mp", None, "tp")
+            q_ps = PartitionSpec("fsdp", "sp", None, None)
+            k_ps = PartitionSpec("fsdp", "sp", None, None)
+            v_ps = PartitionSpec("fsdp", "sp", None, None)
+            b_ps = PartitionSpec("fsdp", "sp", None, None)
+            a_ps = PartitionSpec("fsdp", "sp", None, None)
         else:
-            q_ps = PartitionSpec("dp", "mp", "fsdp", "tp")
-            k_ps = PartitionSpec("dp", "mp", "fsdp", "tp")
-            v_ps = PartitionSpec("dp", "mp", "fsdp", "tp")
+            q_ps = PartitionSpec("dp", "sp", "fsdp", None)
+            k_ps = PartitionSpec("dp", "sp", "fsdp", None)
+            v_ps = PartitionSpec("dp", "sp", "fsdp", None)
             b_ps = PartitionSpec("dp", "fsdp", None, None)
-            a_ps = PartitionSpec("dp", "mp", "fsdp", "tp")
+            a_ps = PartitionSpec("dp", "sp", "fsdp", None)
     return EasyDelPartitions(
         q_ps=q_ps,
         k_ps=k_ps,

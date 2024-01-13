@@ -1,4 +1,4 @@
-from typing import Union, Optional, Tuple, Any, Mapping, Sequence
+from typing import Union, Optional, Tuple, Any, Mapping
 import jax
 import jax.numpy as jnp
 import numpy as onp
@@ -8,95 +8,13 @@ import flax.linen as nn
 from flax.core import FrozenDict
 from jax import numpy as np
 from transformers.modeling_flax_outputs import FlaxCausalLMOutput
-from transformers import PretrainedConfig
+
 from jax.sharding import PartitionSpec
 from ..flax_modelling_utils import get_gradient_checkpoint_policy, \
     with_sharding_constraint
 import chex
-
-
-class PalmConfig(PretrainedConfig):
-    def __init__(self,
-                 vocab_size: Optional[int] = 32000,
-                 hidden_size: Optional[int] = 4096,
-                 dim_head: Optional[int] = None,
-                 num_hidden_layers: Optional[int] = 32,
-                 num_attention_heads: Optional[int] = 32,
-                 up_inner_dim: Optional[int] = 4,
-                 eps: Optional[float] = 1e-5,
-                 max_length: int = 8196,  # Easydel trained palm with length of 8196
-                 bos_token_id: int = 0,
-                 eos_token_id: int = 1,
-                 gradient_checkpointing='nothing_saveable',
-                 use_pjit_attention_force: bool = False,
-                 use_tie_word_embedding: bool = True
-                 ):
-        super().__init__(
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id
-        )
-        dim_head = dim_head if dim_head is not None else hidden_size // num_attention_heads
-        self.dim_head = dim_head
-        self.up_inner_dim = up_inner_dim
-        self.use_pjit_attention_force = use_pjit_attention_force
-        self.gradient_checkpointing = gradient_checkpointing
-        self.num_attention_heads = num_attention_heads
-        self.use_tie_word_embedding = use_tie_word_embedding
-        self.num_hidden_layers = num_hidden_layers
-        self.hidden_size = hidden_size
-        self.vocab_size = vocab_size
-        self.eps = eps
-        self.max_length = max_length
-
-    @staticmethod
-    def _set_config_defaults(config, config_defaults):
-        for (k, v) in config_defaults.items():
-            if k not in config:
-                config[k] = v
-        return config
-
-    @staticmethod
-    def get_partition_rules(fully_fsdp: bool = False):
-        return (
-            ('wi/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('attn_wo/kernel', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('ff_wo/kernel', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('wte/embedding', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('lm_head/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('post_norm/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('norm/kernel', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('.*', PartitionSpec(None)),
-        ) if not fully_fsdp else (
-            ('wi/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('attn_wo/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('ff_wo/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('wte/embedding', PartitionSpec(('fsdp', 'mp'))),
-            ('lm_head/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('post_norm/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('norm/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('.*', PartitionSpec(('fsdp', 'mp'))),
-        )
-
-    def add_jax_args(
-            self,
-            axis_dims: Sequence[int] = (1, -1, 1, 1),
-            axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
-            q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec("dp", None, ("dp", "fsdp"), None),
-            a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            backend: Optional[str] = None,
-            **kwargs,
-    ):
-        self.axis_names = axis_names
-        self.axis_dims = axis_dims
-        self.q_ps = q_ps
-        self.k_ps = k_ps
-        self.v_ps = v_ps
-        self.b_ps = b_ps
-        self.a_ps = a_ps
-        self.backend = backend
+from .palm_configuration import PalmConfig
+from ..easydel_modelling_utils import EasyDelFlaxPretrainedModel
 
 
 class RMSNorm(nn.Module):
@@ -205,27 +123,18 @@ class ParallelPalmBlock(nn.Module):
 
         sim = jnp.einsum('... h i d, ... j d -> ... h i j', q, k)
         if self.config.use_pjit_attention_force:
-            sim = with_sharding_constraint(sim, PartitionSpec(('dp', 'fsdp'), 'mp', None, None))
+            sim = with_sharding_constraint(sim, PartitionSpec(("dp", "fsdp"), "sp", None, None))
         mask_value = jnp.finfo(hidden_state).min
         attn = nn.softmax(np.where(causal_mask, sim, mask_value), axis=-1)
 
         out = jnp.einsum('... h i j, ... j d -> ... h i d', attn, v)
         if self.config.use_pjit_attention_force:
-            out = with_sharding_constraint(out, PartitionSpec(('dp', 'fsdp'), 'mp', None, None))
+            out = with_sharding_constraint(out, PartitionSpec(("dp", "fsdp"), "sp", None, None))
         attn_out = rearrange(out, '... h n hd -> ... n (h hd)') @ self.attn_wo
 
         ff_out = (ff * nn.swish(ff_gate)) @ self.ff_wo
 
         return attn_out + ff_out
-
-
-def get_gradient_checkpoint_policy(name):
-    return {
-        'everything_saveable': jax.checkpoint_policies.everything_saveable,
-        'nothing_saveable': jax.checkpoint_policies.nothing_saveable,
-        'checkpoint_dots': jax.checkpoint_policies.checkpoint_dots,
-        'checkpoint_dots_with_no_batch_dims': jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-    }[name]
 
 
 class ParallelCollection(nn.Module):
@@ -236,7 +145,7 @@ class ParallelCollection(nn.Module):
 
     def setup(self) -> None:
         block = ParallelPalmBlock
-        if self.config.gradient_checkpointing != '':
+        if self.config.gradient_checkpointing != "":
             block = nn.remat(
                 block,
                 policy=get_gradient_checkpoint_policy(self.config.gradient_checkpointing)
@@ -267,7 +176,7 @@ class ParallelCollection(nn.Module):
         return hidden_state, saves
 
 
-class PalmPretrainedModel(transformers.FlaxPreTrainedModel):
+class PalmPretrainedModel(EasyDelFlaxPretrainedModel):
     module_class: nn.Module
     config_class = PalmConfig
     dtype: jnp.dtype = jnp.bfloat16
@@ -324,7 +233,7 @@ class PalmPretrainedModel(transformers.FlaxPreTrainedModel):
         return model_kwargs
 
 
-class PalmModule(nn.Module):
+class FlaxPalmModule(nn.Module):
     config: PalmConfig
     dtype: jnp.dtype = jnp.bfloat16
     param_dtype: jnp.dtype = jnp.bfloat16
@@ -408,8 +317,14 @@ class PalmModule(nn.Module):
             return hidden_state, atn
 
 
-class PalmModel(PalmPretrainedModel):
-    module_class = PalmModule
+class FlaxPalmModel(PalmPretrainedModel):
+    module_class = FlaxPalmModule
+
+    def get_input_embeddings(self):
+        return self.module.wte
+
+    def set_input_embeddings(self, value):
+        self.module.wte = value
 
 
 class FlaxPalmForCausalLMModule(nn.Module):
@@ -419,7 +334,7 @@ class FlaxPalmForCausalLMModule(nn.Module):
     precision: Optional[Union[jax.lax.Precision, str]] = None
 
     def setup(self) -> None:
-        self.path_way = PalmModule(
+        self.path_way = FlaxPalmModule(
             config=self.config,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
@@ -461,3 +376,21 @@ class FlaxPalmForCausalLMModule(nn.Module):
 
 class FlaxPalmForCausalLM(PalmPretrainedModel):
     module_class = FlaxPalmForCausalLMModule
+
+    def get_input_embeddings(self):
+        return self.module.path_way.wte
+
+    def get_decoder(self):
+        return self.module.path_way
+
+    def set_input_embeddings(self, value):
+        self.module.path_way.wte = value
+
+    def set_decoder(self, decoder):
+        self.module.path_way = decoder
+
+    def set_output_embeddings(self, new_embeddings):
+        self.module.lm_head = new_embeddings
+
+    def get_output_embeddings(self):
+        return self.module.lm_head
