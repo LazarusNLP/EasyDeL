@@ -5,29 +5,11 @@ from flax.traverse_util import flatten_dict
 from flax.serialization import from_bytes, to_bytes, to_state_dict
 import msgpack
 import os
+from fjformer import get_dtype
+from jax import numpy as jnp
+from typing import List
+from tqdm import tqdm
 
-
-def get_float_dtype_by_name(dtype):
-    """
-    The get_float_dtype_by_name function is a helper function that returns the JAX float dtype
-    corresponding to the string name of a floating point type.  This is useful for converting
-    between strings and JAX float types, which are used in many places throughout this codebase.
-
-
-    :param dtype: Specify the type of data that is being passed into the function
-    :return: The float dtype of the input string
-    
-    """
-    return {
-        'bf16': jax.numpy.bfloat16,
-        'bfloat16': jax.numpy.bfloat16,
-        'fp16': jax.numpy.float16,
-        'float16': jax.numpy.float16,
-        'fp32': jax.numpy.float32,
-        'float32': jax.numpy.float32,
-        'fp64': jax.numpy.float64,
-        'float64': jax.numpy.float64,
-    }[dtype]
 
 
 def float_tensor_to_dtype(tensor, dtype):
@@ -39,10 +21,10 @@ def float_tensor_to_dtype(tensor, dtype):
     :return: A tensor with the specified dtype
     
     """
-    if dtype is None or dtype == '':
+    if dtype is None or dtype == "":
         return tensor
     if isinstance(dtype, str):
-        dtype = get_float_dtype_by_name(dtype)
+        dtype = get_dtype(dtype)
     float_dtypes = (jax.numpy.bfloat16, jax.numpy.float16, jax.numpy.float32, jax.numpy.float64)
     if getattr(tensor, 'dtype', None) in float_dtypes:
         tensor = tensor.astype(dtype)
@@ -72,9 +54,11 @@ def match_keywords(string, ts, ns):
 
 def huggingface_to_easydel(
         state_dict,
-        embedding_layer_name: str,
+        *,
+        embedding_layer_names: List[str],
         device,
-        dtype: jax.numpy.dtype = jax.numpy.float16
+        dtype: jax.numpy.dtype = jax.numpy.float16,
+        **kwargs
 ):
     """
     The huggingface_to_easydel function takes a huggingface model's state_dict and converts it to an easydel
@@ -83,24 +67,26 @@ def huggingface_to_easydel(
     the conversion will take place.
 
     :param state_dict: Load the weights from a huggingface model
-    :param embedding_layer_name: str: Identify the embedding layer in the huggingface model
+    :param embedding_layer_names: List[str]: Identify the embedding layer in the huggingface model
     :param device: Determine which device the model will be loaded on
     :param dtype: jax.numpy.dtype: Specify the data type of the tensors
     :return: A dictionary of the weights and biases in a format that can be used by flax (it's an UnFlattenDict)
     
     """
+    if isinstance(embedding_layer_names, str):
+        embedding_layer_names = [embedding_layer_names]
     _l = len('.weight')
     with jax.default_device(device):
         flax_dict = {}
         for key, tensor in state_dict.items():
-            if embedding_layer_name in key:
-                # tensor = tensor.transpose(0, 1)
-                key = key[:-_l] + '.embedding'
-            elif match_keywords(key, ['kernel'], ['none']):
-                if len(tensor.shape) == 2:
-                    tensor = tensor.transpose(0, 1)
-                if key.endswith('.weight'):
-                    key = key[:-_l] + '.kernel'
+            for embedding_layer_name in embedding_layer_names:
+                if embedding_layer_name in key:
+                    key = key[:-_l] + '.embedding'
+                elif match_keywords(key, ['weight'], ['none']):
+                    if len(tensor.shape) == 2:
+                        tensor = tensor.transpose(0, 1)
+                    if key.endswith('.weight'):
+                        key = key[:-_l] + '.kernel'
             key_tuple = key.split('.')
             key_names = ()
             tensor = tensor.detach().cpu().numpy()
@@ -159,3 +145,76 @@ def save_ckpt(train_state, path, gather_fns=None, float_dtype=None):
                 value = gather_fns[key](value)
             value = float_tensor_to_dtype(value, float_dtype)
             stream.write(packer.pack((key, to_bytes(value))))
+
+
+def easystate_to_torch(
+    state,
+    dtype=jnp.float16,
+    transpose_needed=None,
+    transpose_not_needed=None,
+    select_params_field: bool = True
+):
+    import torch
+
+    if transpose_needed is None:
+        transpose_needed = ["kernel"]
+    if transpose_not_needed is None:
+        transpose_not_needed = ['none']
+
+    def match_keywords(string, do_transpose, dont_transpose):
+        for dtr in do_transpose:
+            if dtr not in string:
+                return False
+        for ntr in dont_transpose:
+            if ntr in string:
+                return False
+        return True
+
+    model_parameters = flatten_dict(
+        state.params['params'],
+        sep='.'
+    ) if select_params_field else flatten_dict(
+        state.params,
+        sep='.'
+    )
+    torch_state_dict = {}
+    pbar = tqdm(
+        model_parameters.items(),
+        desc="Converting EasyDelState to torch state_dict"
+    )
+    for key, tensor in pbar:
+        if match_keywords(key, transpose_needed, transpose_not_needed):
+            tensor = tensor.T
+        tensor = tensor.astype(get_dtype(dtype))
+        torch_state_dict[key.replace(".kernel",".weight").replace(".embedding",".weight")] = torch.from_numpy(tensor)
+    return torch_state_dict
+
+
+def easystate_to_huggingface_model(
+    state,
+    config,
+    base_huggingface_module,
+    base_huggingface_module_kwarguments=None,
+    dtype=jnp.float16,
+    transpose_needed=None,
+    transpose_not_needed=None,
+    select_params_field: bool = True
+):
+    if base_huggingface_module_kwarguments is None:
+        base_huggingface_module_kwarguments = {}
+    state_dict = easystate_to_torch(
+        state=state,
+        dtype=dtype,
+        transpose_needed=transpose_needed,
+        transpose_not_needed=transpose_not_needed,
+        select_params_field=select_params_field
+    )
+    model = base_huggingface_module(
+        config=config,
+        **base_huggingface_module_kwarguments
+    )
+    model.load_state_dict(state_dict)
+    return model
+
+
+    

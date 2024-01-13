@@ -1,9 +1,9 @@
-from EasyDel import TrainArguments, CausalLMTrainer
+from EasyDel import TrainArguments, CausalLanguageModelTrainer
 from datasets import load_dataset
 from huggingface_hub import HfApi
 import EasyDel
 from absl import flags, app
-from fjformer.load._load import get_float_dtype_by_name
+from fjformer.checkpoint import get_dtype
 
 FLAGS = flags.FLAGS
 
@@ -16,7 +16,7 @@ flags.DEFINE_string(
 )
 
 flags.DEFINE_string(
-    name='ckpt_path',
+    name='checkpoint_path',
     required=True,
     help='path to model weights for example (ckpt/falcon_easydel_format)',
     default=None
@@ -170,8 +170,8 @@ def main(argv):
 
     train_args = TrainArguments(
         model_class=EasyDel.modules.FlaxFalconForCausalLM,
-        configs_to_init_model_class={'config': config, 'dtype': get_float_dtype_by_name(FLAGS.dtype),
-                                     'param_dtype': get_float_dtype_by_name(FLAGS.dtype)},
+        configs_to_init_model_class={'config': config, 'dtype': get_dtype(FLAGS.dtype),
+                                     'param_dtype': get_dtype(FLAGS.dtype)},
         custom_rule=config.get_partition_rules(True),
         model_name=FLAGS.project_name,
         num_train_epochs=FLAGS.num_train_epochs,
@@ -196,10 +196,10 @@ def main(argv):
 
     )
 
-    trainer = CausalLMTrainer(train_args,
+    trainer = CausalLanguageModelTrainer(train_args,
                               dataset_train=dataset_train['train'],
                               dataset_eval=dataset_train['eval'] if FLAGS.do_eval else None,
-                              ckpt_path=FLAGS.ckpt_path)
+                              checkpoint_path=FLAGS.checkpoint_path)
     output = trainer.train()
     # Done You can simply train any Falcon LLM that you want in less than 50 lines of code
 

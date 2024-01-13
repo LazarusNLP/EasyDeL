@@ -6,7 +6,7 @@ from flax.traverse_util import unflatten_dict
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from pydantic import BaseModel
-from fjformer.load._load import get_float_dtype_by_name
+from fjformer.checkpoint import get_dtype
 from gradio.themes.base import Base
 from gradio.themes.utils import colors, fonts, sizes
 from typing import Union
@@ -65,7 +65,7 @@ class Seafoam(Base):
         :param text_size: Union[sizes.Size,str]: Set the size of the text in the app
 
         :return: The class object
-        
+
         """
 
         super().__init__(
@@ -93,6 +93,16 @@ class Seafoam(Base):
             block_shadow="*shadow_drop_lg",
             button_shadow="*shadow_drop_lg",
             button_large_padding="4px",
+            border_color_primary="linear-gradient(90deg, *primary_600, *secondary_800)",
+            border_color_primary_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
+            table_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
+            table_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
+            button_primary_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
+            button_primary_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
+            panel_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
+            panel_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
+            block_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
+            block_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)"
         )
 
 
@@ -101,14 +111,14 @@ seafoam = Seafoam()
 
 def get_dtype(dtype):
     if isinstance(dtype, str):
-        dtype = get_float_dtype_by_name(dtype)
+        dtype = get_dtype(dtype)
     return dtype
 
 
 def shard_params(params, partition_rules,
                  shard_mesh_shape=(1, -1, 1, 1),
                  backend='gpu',
-                 shard_mesh=("dp", "fsdp", "tp", "mp"), do_unf=True,
+                 shard_mesh=("dp", "fsdp", "tp", "sp"), do_unf=True,
                  dtype='fp16'):
     dtype = get_dtype(dtype)
     params = unflatten_dict(params) if do_unf else params

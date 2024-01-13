@@ -2,128 +2,18 @@ import math
 
 from flax import linen as nn
 from flax.core import FrozenDict
-from typing import Optional, Dict, Union, Tuple, Sequence
-from transformers import FlaxPreTrainedModel, PretrainedConfig
+from typing import Optional, Dict, Union, Tuple
+from transformers import FlaxPreTrainedModel
 from jax import numpy as jnp
 import jax
 from jax.sharding import PartitionSpec
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput
 from einops import rearrange
 from ..flax_modelling_utils import get_gradient_checkpoint_policy, \
-    with_sharding_constraint, ACT2FN, JaxBaseClassModel
+    with_sharding_constraint, ACT2FN
 import chex
-
-
-class GPTNeoXConfig(PretrainedConfig, JaxBaseClassModel):
-    model_type = "gpt_neox"
-
-    def __init__(
-            self,
-            vocab_size=50432,
-            hidden_size=6144,
-            num_hidden_layers=44,
-            num_attention_heads=64,
-            intermediate_size=24576,
-            hidden_act="gelu",
-            rotary_pct=0.25,
-            rotary_emb_base=10000,
-            classifier_dropout=0.1,
-            max_position_embeddings=2048,
-            initializer_range=0.02,
-            layer_norm_eps=1e-5,
-            use_cache=True,
-            bos_token_id=0,
-            eos_token_id=2,
-            tie_word_embeddings=False,
-            gradient_checkpointing='everything_saveable',
-            use_parallel_residual=True,
-            axis_dims: Sequence[int] = (1, -1, 1, 1),
-            axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
-            **kwargs,
-    ):
-        super().__init__(
-            axis_dims=axis_dims,
-            axis_names=axis_names,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            **kwargs
-        )
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.intermediate_size = intermediate_size
-        self.hidden_act = hidden_act
-        self.rotary_pct = rotary_pct
-        self.rotary_emb_base = rotary_emb_base
-        self.classifier_dropout = classifier_dropout
-        self.initializer_range = initializer_range
-        self.layer_norm_eps = layer_norm_eps
-        self.use_cache = use_cache
-        self.tie_word_embeddings = tie_word_embeddings
-        self.gradient_checkpointing = gradient_checkpointing
-
-        self.use_parallel_residual = use_parallel_residual
-        self.from_pt = False
-
-    @staticmethod
-    def get_partition_rules(fully_fsdp: bool = False):
-        return (
-            ('wte/embedding', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('attention/w_qkv/(kernel|bias)', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('attention/wo/(kernel|bias)', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('mlp/dense_h_to_4h/(kernel|bias)', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('mlp/dense_4h_to_h/(kernel|bias)', PartitionSpec('tp', ('fsdp', 'mp'))),
-
-            ('post_attention_layernorm/(bias|scale)', PartitionSpec(('fsdp', 'mp'), 'tp')),
-            ('input_layernorm/(bias|scale)', PartitionSpec(('fsdp', 'mp'), 'tp')),
-
-            ('transformer/final_layer_norm/(scale|bias)', PartitionSpec('tp', ('fsdp', 'mp'))),
-            ('lm_head/kernel', PartitionSpec('tp', ('fsdp', 'mp'))),
-            ('.*', PartitionSpec(None))
-        ) if not fully_fsdp else (
-
-            ('embed_in/embedding', PartitionSpec(('fsdp', 'mp'))),
-
-            ('attention/w_qkv/(kernel|bias)', PartitionSpec(('fsdp', 'mp'))),
-            ('attention/wo/(kernel|bias)', PartitionSpec(('fsdp', 'mp'))),
-            ('mlp/dense_h_to_4h/(kernel|bias)', PartitionSpec(('fsdp', 'mp'))),
-            ('mlp/dense_4h_to_h/(kernel|bias)', PartitionSpec(('fsdp', 'mp'))),
-
-            ('post_attention_layernorm/(bias|scale)', PartitionSpec(('fsdp', 'mp'))),
-            ('input_layernorm/(bias|scale)', PartitionSpec(('fsdp', 'mp'))),
-
-            ('transformer/final_layer_norm/(scale|bias)', PartitionSpec(('fsdp', 'mp'))),
-            ('lm_head/kernel', PartitionSpec(('fsdp', 'mp'))),
-            ('.*', PartitionSpec(None))
-        )
-
-    @staticmethod
-    def get_mesh_names():
-        return "dp", "fsdp", "tp", "mp"
-
-    def add_jax_args(
-            self,
-            axis_dims: Sequence[int] = (1, -1, 1, 1),
-            axis_names: Sequence[str] = ("dp", "fsdp", "tp", "mp"),
-            q_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            k_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            v_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            b_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec("dp", None, ("dp", "fsdp"), None),
-            a_ps: jax.sharding.PartitionSpec = jax.sharding.PartitionSpec(("dp", "fsdp"), "mp", "tp", None),
-            backend: Optional[str] = None,
-            **kwargs,
-    ):
-        self.axis_names = axis_names
-        self.axis_dims = axis_dims
-        self.q_ps = q_ps
-        self.k_ps = k_ps
-        self.v_ps = v_ps
-        self.b_ps = b_ps
-        self.a_ps = a_ps
-        self.backend = backend
-        self.from_pt = False
+from .gpt_neo_x_configuration import GPTNeoXConfig
+from ..easydel_modelling_utils import EasyDelFlaxPretrainedModel
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0,
@@ -189,9 +79,9 @@ class FlaxGPTNeoXAttention(nn.Module):
         b, s, d = hidden_states.shape
         q, k, v = jnp.split(self.w_qkv(hidden_states), indices_or_sections=3, axis=-1)
         freq = self.freq_cis[:s].reshape(1, s, -1)
-        q = with_sharding_constraint(q, PartitionSpec(('dp', 'fsdp'), None, 'mp'))
-        k = with_sharding_constraint(k, PartitionSpec(('dp', 'fsdp'), None, 'mp'))
-        v = with_sharding_constraint(v, PartitionSpec(('dp', 'fsdp'), None, 'mp'))
+        q = with_sharding_constraint(q, PartitionSpec(("dp", "fsdp"), None, "sp"))
+        k = with_sharding_constraint(k, PartitionSpec(("dp", "fsdp"), None, "sp"))
+        v = with_sharding_constraint(v, PartitionSpec(("dp", "fsdp"), None, "sp"))
 
         q = rearrange(q, 'b s (h d) -> b s h d', h=self.config.num_attention_heads)
         k = rearrange(k, 'b s (h d) -> b s h d', h=self.config.num_attention_heads)
@@ -209,7 +99,7 @@ class FlaxGPTNeoXAttention(nn.Module):
         if attention_mask is not None:
             attn += attention_mask
         attn = jax.nn.softmax(attn, axis=-1)
-        attn = with_sharding_constraint(attn, PartitionSpec(('dp', 'fsdp'), 'mp', None, None))
+        attn = with_sharding_constraint(attn, PartitionSpec(("dp", "fsdp"), "sp", None, None))
         attn = jnp.einsum('...hqk,..khd->qhd', attn, v, precision=self.precision)
         attn = self.w_o(attn.reshape(b, s, d))
         return attn
@@ -298,7 +188,7 @@ class FlaxGPTNeoXCollection(nn.Module):
 
     def setup(self) -> None:
         block = FlaxGPTNeoXBlock
-        if self.config.gradient_checkpointing != '':
+        if self.config.gradient_checkpointing != "":
             block = nn.remat(
                 block, static_argnums=None,
                 policy=get_gradient_checkpoint_policy(
@@ -372,7 +262,7 @@ class FlaxGPTNeoXModule(nn.Module):
             return hidden_state,
 
 
-class FlaxGPTNeoXPretrainedModel(FlaxPreTrainedModel):
+class FlaxGPTNeoXPretrainedModel(EasyDelFlaxPretrainedModel):
     module_class: nn.Module = None
     config_class = GPTNeoXConfig
 
@@ -390,11 +280,15 @@ class FlaxGPTNeoXPretrainedModel(FlaxPreTrainedModel):
             )
         return params['params']
 
-    def __call__(self, input_ids,
-                 attention_mask=None,
-                 params: FrozenDict = None,
-                 add_params_field: bool = False,
-                 return_dict: bool = True):
+    def __call__(
+            self,
+            input_ids,
+            attention_mask=None,
+            params: FrozenDict = None,
+            add_params_field: bool = False,
+            return_dict: bool = True,
+            **kwargs
+    ):
         params = {'params': params or self.params} if add_params_field else params or self.params
         predict = self.module.apply(
             params,
@@ -416,6 +310,12 @@ class FlaxGPTNeoXPretrainedModel(FlaxPreTrainedModel):
 
 class FlaxGPTNeoXModel(FlaxGPTNeoXPretrainedModel):
     module_class = FlaxGPTNeoXModule
+
+    def get_input_embeddings(self):
+        return self.module.wte
+
+    def set_input_embeddings(self, value):
+        self.module.wte = value
 
 
 class FlaxGPTNeoXForCausalLMModule(nn.Module):
@@ -443,3 +343,21 @@ class FlaxGPTNeoXForCausalLMModule(nn.Module):
 
 class FlaxGPTNeoXForCausalLM(FlaxGPTNeoXPretrainedModel):
     module_class = FlaxGPTNeoXForCausalLMModule
+
+    def get_output_embeddings(self):
+        return self.module.lm_head
+
+    def get_decoder(self):
+        return self.module.transformer
+
+    def get_input_embeddings(self):
+        return self.module.transformer.wte
+
+    def set_output_embeddings(self, new_embeddings):
+        self.module.lm_head = new_embeddings
+
+    def set_decoder(self, decoder):
+        self.module.transformer = decoder
+
+    def set_input_embeddings(self, value):
+        self.module.transformer.wte = value

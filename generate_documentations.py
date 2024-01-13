@@ -1,5 +1,25 @@
+import json
 import os
-import sys
+import re
+
+import yaml
+
+cache = {}
+
+
+def unflatten_dict(xs, sep=None):
+    assert isinstance(xs, dict), f"input is not a dict; it is a {type(xs)}"
+    result = {}
+    for path, value in xs.items():
+        if sep is not None:
+            path = path.split(sep)
+        cursor = result
+        for key in path[:-1]:
+            if key not in cursor:
+                cursor[key] = {}
+            cursor = cursor[key]
+        cursor[path[-1]] = value
+    return result
 
 
 def get_inner(path: str):
@@ -16,27 +36,134 @@ def get_files(path: str):
             os.path.exists(os.path.join(path, o)) and not os.path.isdir(os.path.join(path, o))]
 
 
-def run(project_locations="lib/python/EasyDel"):
+def run(project_locations="lib/python/EasyDel", docs_file="docs/", start_head="lib/python/EasyDel"):
+    global cache
+    for current_file in get_inner(docs_file):
+        if current_file.startswith("generated-"):
+            os.remove(os.path.join(docs_file, current_file))
     try:
-        for ps in get_inner(project_locations):
-            is_file = not os.path.isdir(ps)
-            if not ps.endswith("__init__.py") and is_file and ps.endswith('.py'):
-                name = ps.replace(".py", "").replace("/", ".")
+        for current_file in get_inner(project_locations):
+            if not current_file.endswith(
+                    "__init__.py"
+            ) and not os.path.isdir(
+                current_file
+            ) and current_file.endswith(
+                ".py"
+            ):
 
-                md_doc = f"# {name}\n::: {name}"
-                md_file = name.replace(".", "-") + '.md'
-                with open("docs/" + md_file, 'w') as buffer:
-                    buffer.write(md_doc)
+                doted = (
+                        start_head
+                        .replace(os.path.sep, ".")
+                        .replace("/", ".") + "."
+                )
 
-                print(f" - {name.replace('.', '/')} : {md_file}")
+                name = (
+                    current_file
+                    .replace(".py", "")
+                    .replace(os.path.sep, ".")
+                    .replace("/", ".")
+                )
+
+                markdown_documentation = f"# {name.replace(doted, '')}\n::: {name}"
+                categorical_name = name.replace(doted, "")
+                markdown_filename = (
+                        "generated-" + name
+                        .replace(doted, "")
+                        .replace(".", "-")
+                        + ".md"
+                )
+
+                with open(docs_file + markdown_filename, "w") as buffer:
+                    buffer.write(markdown_documentation)
+                category_tuple = tuple(categorical_name.split("."))
+                edited_category_tuple = ()
+
+                for key in category_tuple:
+                    key = key.split("_")
+                    capitalized_words = [word.capitalize() for word in key if word != ""]
+                    edited_category_tuple += (" ".join(capitalized_words),)
+                cache[edited_category_tuple] = markdown_filename
             else:
-                run(ps)
+                run(current_file)
     except NotADirectoryError:
         ...
 
 
 def main():
+    global cache
     run()
+    mkdocstrings_options = {
+        "mkdocstrings": {
+            "handlers": {
+                "python": {
+                    "options": {
+                        "docstring_style": "sphinx"
+                    }
+                }
+            },
+        }
+    }
+    theme_options = {
+
+        "name": "material",
+        "highlightjs": True,
+        "hljs_languages": [
+            "yaml", "python"
+        ]
+
+    }
+
+    string_options = """
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: sphinx
+
+repo_url: https://github.com/erfanzar/EasyDel
+site_author: Erfan Zare Chavoshi
+site_name: EasyDel
+copyright: Erfan Zare Chavoshi-EasyDel
+
+theme:
+  highlightjs: true
+  hljs_languages:
+    - yaml
+    - python
+  name: material
+"""
+
+    statics = {
+        ("Home",): "index.md",
+        ("install",): "Install.md",
+        ("AvailableModels",): "AvailableModels.md",
+        ("EasyBIT",): "Bits.md",
+        ("Examples", "PytorchServer"): "PyTorchServer.md",
+        ("Examples", "JAXServer"): "JAXServer.md",
+        ("Examples", "DataProcessing"): "DataProcessing.md",
+        ("Examples", "TrainingExample"): "TrainingExample.md",
+        ("Examples", "Falcon Models"): "Falcon.md",
+        ("Examples", "Llama Models"): "Llama.md",
+        ("Examples", "Llama2 Models"): "Llama2.md",
+        ("Examples", "Mistral Models"): "Mistral.md",
+        ("Examples", "MosaicMPT Models"): "MosaicMPT.md",
+    }
+
+    cache = statics | cache
+    pages = unflatten_dict(cache)
+    yaml_data = {
+        "nav": pages,
+    }
+    buff = open("mkdocs.yml", "w")
+    yaml.safe_dump(yaml_data, buff)
+    chk = open("mkdocs.yml", "r")
+    wrote = chk.read()
+    output_string = re.sub(r'(\n\s*)(\w[^:\n]*:)(.*?)(?=\n\s*\w[^:\n]*:|\Z)', r'\1- \2\3', str(wrote), flags=re.DOTALL)
+    buff = open("mkdocs.yml", "w")
+    buff.write(output_string)
+    buff.write(string_options)
 
 
 if __name__ == "__main__":
