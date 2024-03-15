@@ -31,9 +31,6 @@ class MptConfig(EasyDelPretrainedConfig):
                  use_norm_bias: bool = False,
                  gradient_checkpointing: str = 'nothing_saveable',
                  use_pjit_attention_force: bool = False,
-                 use_flash_attention: bool = False,
-                 flash_attn_query_chunk_size: int = 1024,
-                 flash_attn_key_chunk_size: int = 2048,
                  bits: Optional[int] = None,
                  **kwargs
                  ):
@@ -60,9 +57,6 @@ class MptConfig(EasyDelPretrainedConfig):
         self.verbose = verbose
         self.embedding_fraction = embedding_fraction
         self.use_cache = use_cache
-        self.use_flash_attention = use_flash_attention
-        self.flash_attn_key_chunk_size = flash_attn_key_chunk_size
-        self.flash_attn_query_chunk_size = flash_attn_query_chunk_size
         self.bits = bits
 
         self.from_pt = False
@@ -71,6 +65,7 @@ class MptConfig(EasyDelPretrainedConfig):
         if 'loss_fn' in kwargs:
             del kwargs['loss_fn']
         super().__init__(
+            bits=bits,
             **kwargs
         )
 
@@ -156,9 +151,6 @@ class MptConfig(EasyDelPretrainedConfig):
                      use_norm_bias: bool = False,
                      gradient_checkpointing: str = 'nothing_saveable',
                      use_pjit_attention_force: bool = False,
-                     use_flash_attention: bool = False,
-                     flash_attn_query_chunk_size: int = 1024,
-                     flash_attn_key_chunk_size: int = 2048,
                      bits: Optional[int] = None,
                      **kwargs,
                      ):
@@ -189,9 +181,6 @@ class MptConfig(EasyDelPretrainedConfig):
             use_norm_bias=use_norm_bias,
             gradient_checkpointing=gradient_checkpointing,
             use_pjit_attention_force=use_pjit_attention_force,
-            use_flash_attention=use_flash_attention,
-            flash_attn_query_chunk_size=flash_attn_query_chunk_size,
-            flash_attn_key_chunk_size=flash_attn_key_chunk_size,
             **kwargs
         )
         for k, v in basics.items():
