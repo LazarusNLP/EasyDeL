@@ -1,7 +1,8 @@
 import os.path
 import pathlib
 import re
-from typing import OrderedDict, List, Union, Mapping, Optional, Tuple, Callable
+import typing
+from typing import OrderedDict, List, Union, Mapping, Optional, Tuple, Callable, Type
 
 import termcolor
 from wandb.apis.public import Run
@@ -14,7 +15,7 @@ import torch.utils.tensorboard
 import wandb
 from fjformer import CheckpointManager
 from jax.experimental.mesh_utils import create_device_mesh
-
+from fjformer.xrapture import XRapTureConfig, XRapTure
 from jax.sharding import Mesh
 from jax import numpy as jnp
 import jax
@@ -28,9 +29,21 @@ from ..etils import (
 )
 from ..modules.easydel_modelling_utils import EasyDelFlaxPretrainedModel
 
+from jax.tree_util import PyTreeDef
+
 AVAILABLE_BACKENDS: List[str] = [
     "cpu", "gpu", "tpu", None
 ]
+
+
+class EasyDeLXRapTureConfig(XRapTureConfig):  # Don't Make user involved with FJFormer
+    def __init__(
+            self,
+            parameters: PyTreeDef | dict,
+            **kwargs
+    ):
+        self.parameters = parameters
+        super().__init__(**kwargs)
 
 
 class TrainArguments(
@@ -40,27 +53,31 @@ class TrainArguments(
             self,
             model_name: str,
             num_train_epochs: int,
-            model_id: Optional[str] = None,
-            model_class: Optional[EasyDelFlaxPretrainedModel] = None,
+            model_class: Optional[EasyDelFlaxPretrainedModel | Type[EasyDelFlaxPretrainedModel]] = None,
+            model_huggingface_repo_id: Optional[str] = None,
             total_batch_size: int = 32,
-            max_steps: Optional[int] = None,
+            max_training_steps: Optional[int] = None,
             optimizer: AVAILABLE_OPTIMIZERS = EasyDelOptimizers.ADAMW,
             scheduler: AVAILABLE_SCHEDULERS = EasyDelSchedulers.NONE,
             learning_rate: Union[int, float] = 5e-5,
             learning_rate_end: Optional[float] = 5e-6,
             gradient_accumulation_steps: int = 1,
             weight_decay: float = 0.01,
+            label_smoothing_factor: float = 0.0,
+            z_loss: float = 0.0,
             gradient_checkpointing: AVAILABLE_GRADIENT_CHECKPOINTS = EasyDelGradientCheckPointers.NOTHING_SAVEABLE,
-            max_length: Optional[int] = 4096,
+            max_sequence_length: Optional[int] = 4096,
             sharding_array: Union[tuple, int] = (1, -1, 1, 1),
             is_fine_tuning: bool = True,
             do_train: bool = True,
             do_eval: bool = False,
             do_test: Optional[bool] = False,
+            train_on_inputs: bool = True,
             backend: Optional[str] = None,
             extra_optimizer_kwargs: dict = None,
             save_steps: Optional[int] = None,
             save_dir: str = "EasyDel-Checkpoints",
+            save_total_limit: Optional[int] = None,
             use_pjit_attention_force: bool = False,
             dtype: jnp.dtype = jnp.bfloat16,
             param_dtype: jnp.dtype = jnp.bfloat16,
@@ -70,14 +87,14 @@ class TrainArguments(
             extra_configs: Optional[dict] = None,
             ids_to_pop_from_dataset: Optional[list] = None,
             remove_ckpt_after_load: bool = False,
-            configs_to_init_model_class: Optional[dict] = None,
+            configs_to_initialize_model_class: Optional[dict] = None,
             do_last_save: bool = True,
             model_parameters: Optional[dict] = None,
             do_shard_fns: bool = True,
-            track_memory: bool = True,
+            track_memory: Optional[bool] = None,
             loss_re_mat: str = "",
             loss_chunk: int = 1024,
-            is_left_padded: bool = False,
+            truncation_mode: typing.Literal["keep_end", "keep_start"] = "keep_end",
             warmup_steps: int = 500,
             init_input_shape: Tuple[int, int] = (1, 1),
             step_partition_spec: PartitionSpec = PartitionSpec(("dp", "fsdp"), "sp"),
@@ -91,71 +108,86 @@ class TrainArguments(
             step_start_point: Optional[int] = None,
             verbose: bool = True,
             offload_device: jax.Device = jax.devices("cpu")[0],
+            rapture_config: Optional[EasyDeLXRapTureConfig] = None,
+            merge_lora_rapture_parameters: bool = True,
+            state_apply_fn_kwarguments_to_model: Optional[dict] = None,
+            remove_unused_columns: bool = True,
+            force_batch_and_gradient_accumulation_steps_calculation: bool = False,
             **kwargs
     ):
         """
-    The __init__ function is called when the class is instantiated.
-    It sets up the attributes of an object, which are sometimes called fields or properties.
-    The __init__ function can accept arguments, just like a normal function.
+The __init__ function is called when the class is instantiated.
+It sets up the attributes of an object, which are sometimes called fields or properties.
+The __init__ function can accept arguments, just like a normal function.
 
-    :param self: Represent the instance of the class
-    :param model_name: str: Specify the model name
-    :param num_train_epochs: int: Set the number of epochs for training
-    :param model_id: Optional[str]: Load a pretrained model from the huggingface model hub
-    :param model_class: Optional[EasyDelFlaxPretrainedModel]: Pass a model class to the trainer
-    :param total_batch_size: int: Set the batch size of the model
-    :param max_steps: Optional[int]: Set the maximum number of steps to train for
-    :param optimizer: AVAILABLE_OPTIMIZERS: Specify the optimizer used to train the model
-    :param scheduler: AVAILABLE_SCHEDULERS: Set the learning rate scheduler
-    :param learning_rate: Union[int: Set the learning rate for the optimizer
-    :param float]: Set the learning rate
-    :param learning_rate_end: Optional[float]: Set the learning rate at the end of training
-    :param gradient_accumulation_steps: int: Accumulate gradients over multiple batches
-    :param weight_decay: float: Specify the weight decay to be used by the optimizer
-    :param gradient_checkpointing: AVAILABLE_GRADIENT_CHECKPOINTS: Determine how to use gradient checkpointing
-    :param max_length: Optional[int]: Set the maximum length of the input sequence
-    :param sharding_array: Union[tuple,int]: Specify the mesh of devices to use for training
-    :param is_fine_tuning: bool: Tell the model whether or not to initialize the weights of
-    :param do_train: bool: Indicate whether to train the model or not
-    :param do_eval: bool: Determine whether to run evaluation on the validation set after training
-    :param do_test: Optional[bool]: Determine if the model should be tested
-    :param backend: Optional[str]: Specify the backend of jax
-    :param extra_optimizer_kwargs: dict: Pass extra arguments to the optimizer
-    :param save_steps: Optional[int]: Save the model after every n steps
-    :param save_dir: str: Define the directory where the checkpoints will be saved
-    :param use_pjit_attention_force: bool: Force the use of pjit for attention layers
-    :param dtype: jnp.dtype: Set the dtype of the model parameters
-    :param param_dtype: jnp.dtype: Specify the data type of the model parameters
-    :param fully_sharded_data_parallel: bool: Determine if the model should be fully fsdp or not
-    :param use_wandb: bool: Enable or disable the wandb logging
-    :param custom_rule: Mapping[str, PartitionSpec]: Specify the partitioning rules of the model
-    :param extra_configs: Optional[dict]: Pass extra configurations to the model class
-    :param ids_to_pop_from_dataset: Optional[list]: Remove some of the ids from the dataset
-    :param remove_ckpt_after_load: bool: Remove the checkpoint after loading it
-    :param configs_to_init_model_class: Optional[dict]: Pass extra configurations to the model class
-    :param do_last_save: bool: Save the model after training is complete
-    :param model_parameters: Optional[dict]: Pass the model parameters to the model class
-    :param do_shard_fns: bool: Shard the model functions across devices
-    :param track_memory: bool: Track the memory usage of the model
-    :param loss_re_mat: str: Specify the regular expression to match the loss function name
-    :param loss_chunk: int: Chunk the loss to avoid memory overflow
-    :param is_left_padded: bool: Determine if the input is left padded or not
-    :param warmup_steps: int: Specify the number of steps to warm up the learning rate
-    :param init_input_shape: Tuple[int, int]: Initialize the model with a shape that is not (batch_size, length)
-    :param step_partition_spec: PartitionSpec: Partition the model for training
-    :param training_time: Optional[str]: Set a time limit for the training process
-    :param dataloader_num_workers: Optional[int]: Set the number of workers used by pytorch's
-    :param dataloader_pin_memory: Optional[bool]: Pin the memory of the dataloader
-    :param jax_distributed_config: Optional[dict]: Configure the jax distributed backend
-    :param log_all_workers: bool: Log all workers in wandb,
-    :param wandb_entity: Optional[str]: Specify the entity to use when logging to weights &amp; biases
-    :param save_optimizer_state : bool: when ever to save optimizer state and other args in checkpoint
-    :param step_start_point: Optional[int]: start training from given step for example instead of starting training from
-    step 0 it will start from 20000 and leave the data behind
-    :param verbose: bool: when ever to turn verbose mode of or on
-    :param offload_device: jax.Device: device to be used to offload parameters on
-    :param **kwargs: Pass keyword, variable-length argument list
-    :return: Nothing
+:param self: Represent the instance of the class
+:param model_name: str: Specify the model name
+:param num_train_epochs: int: Set the number of epochs for training
+:param model_huggingface_repo_id: Optional[str]: Load a pretrained model from the huggingface model hub
+:param model_class: Optional[EasyDelFlaxPretrainedModel]: Pass a model class to the trainer
+:param total_batch_size: int: Set the batch size of the model
+:param max_training_steps: Optional[int]: Set the maximum number of steps to train for
+:param optimizer: AVAILABLE_OPTIMIZERS: Specify the optimizer used to train the model
+:param scheduler: AVAILABLE_SCHEDULERS: Set the learning rate scheduler
+:param learning_rate: Union[int, float] : Set the learning rate for the optimizer
+:param learning_rate_end: Optional[float]: Set the learning rate at the end of training
+:param gradient_accumulation_steps: int: Accumulate gradients over multiple batches
+:param weight_decay: float: Specify the weight decay to be used by the optimizer
+:param label_smoothing_factor: float: Set the label smoothing factor to be used by the loss function
+:param z_loss: float: Set the z loss factor to be used by the loss function
+:param gradient_checkpointing: AVAILABLE_GRADIENT_CHECKPOINTS: Determine how to use gradient checkpointing
+:param max_sequence_length: Optional[int]: Set the maximum length of the input sequence
+:param sharding_array: Union[tuple,int]: Specify the mesh of devices to use for training
+:param is_fine_tuning: bool: Tell the model whether or not to initialize the weights of
+:param do_train: bool: Indicate whether to train the model or not
+:param do_eval: bool: Determine whether to run evaluation on the validation set after training
+:param do_test: Optional[bool]: Determine if the model should be tested
+:param train_on_inputs: bool: Use input_ids instead of labels, overrides ignored (-100) tokens in the labels
+:param backend: Optional[str]: Specify the backend of jax
+:param extra_optimizer_kwargs: dict: Pass extra arguments to the optimizer
+:param save_steps: Optional[int]: Save the model after every n steps
+:param save_dir: str: Define the directory where the checkpoints will be saved
+:param save_total_limit: int: Set the maximum number of checkpoints to keep, older checkpoints will be deleted
+:param use_pjit_attention_force: bool: Force the use of pjit for attention layers
+:param dtype: jnp.dtype: Set the dtype of the model parameters
+:param param_dtype: jnp.dtype: Specify the data type of the model parameters
+:param fully_sharded_data_parallel: bool: Determine if the model should be fully fsdp or not
+:param use_wandb: bool: Enable or disable the wandb logging
+:param custom_rule: Mapping[str, PartitionSpec]: Specify the partitioning rules of the model
+:param extra_configs: Optional[dict]: Pass extra configurations to the model class
+:param ids_to_pop_from_dataset: Optional[list]: Remove some of the ids from the dataset
+:param remove_ckpt_after_load: bool: Remove the checkpoint after loading it
+:param configs_to_initialize_model_class: Optional[dict]: Pass extra configurations to the model class
+:param do_last_save: bool: Save the model after training is complete
+:param model_parameters: Optional[dict]: Pass the model parameters to the model class
+:param do_shard_fns: bool: Shard the model functions across devices
+:param track_memory: bool: Track the memory usage of the model
+:param loss_re_mat: str: Specify the regular expression to match the loss function name
+:param loss_chunk: int: Chunk the loss to avoid memory overflow
+:param truncation_mode: typing.Literal["keep_end", "keep_start"]: Determine if the input is left padded or not and
+which side of the array should remain in case of using maximum padding.
+:param warmup_steps: int: Specify the number of steps to warm up the learning rate
+:param init_input_shape: Tuple[int, int]: Initialize the model with a shape that is not (batch_size, length)
+:param step_partition_spec: PartitionSpec: Partition the model for training
+:param training_time: Optional[str]: Set a time limit for the training process
+:param dataloader_num_workers: Optional[int]: Set the number of workers used by pytorch's
+:param dataloader_pin_memory: Optional[bool]: Pin the memory of the dataloader
+:param jax_distributed_config: Optional[dict]: Configure the jax distributed backend
+:param log_all_workers: bool: Log all workers in wandb,
+:param wandb_entity: Optional[str]: Specify the entity to use when logging to weights &amp; biases
+:param save_optimizer_state : bool: when ever to save optimizer state and other args in checkpoint
+:param step_start_point: Optional[int]: start training from given step for example instead of starting training from
+step 0 it will start from 20000 and leave the data behind
+:param verbose: bool: when ever to turn verbose mode of or on
+:param offload_device: jax.Device: device to be used to offload parameters on
+:param rapture_config: Optional[EasyDeLXRaptureConfig]: LoRA Config for models
+:param merge_lora_rapture_parameters: bool: whenever to merge lora parameters with original parameters before saving
+:param state_apply_fn_kwarguments_to_model: Optional[dict]: state_apply_fn_kwarguments_to_model is a dictionary that
+be used to apply the parameters and extra things that you want to deliver to model.
+:param remove_unused_columns: bool: when ever to remove the unused data columns from dataset
+:param force_batch_and_gradient_accumulation_steps_calculation: bool: whether to force batch and gradient to be
+applied as total batch_size (e.g total_batch_size = total_batch_size * gradient_accumulation_steps be applied)
+:param **kwargs: Pass keyword, variable-length argument list
         """
         super().__init__()
 
@@ -164,47 +196,71 @@ class TrainArguments(
         if extra_optimizer_kwargs is None:
             extra_optimizer_kwargs = {}
 
-        if model_class is None and model_id is None:
+        if model_class is None and model_huggingface_repo_id is None:
             print(
                 termcolor.colored(
                     "Warning : ", color="red", force_color=True
                 ) + termcolor.colored(
-                    "You should at least pass model_class or model_id if you want to use CasualLanguageModel Trainer "
-                    "But in case that you want to use DPOTrainer you can ignore this warning", color="white",
+                    "You should at least pass model_class or model_huggingface_repo_id if you want to use "
+                    "CasualLanguageModel Trainer But in case that you want to use "
+                    "DPOTrainer you can ignore this warning", color="white",
                     force_color=True
                 )
             )
-        assert backend in AVAILABLE_BACKENDS, f"{backend} is not recognized, " \
-                                              f"available backends are {AVAILABLE_BACKENDS}"
+        assert backend in AVAILABLE_BACKENDS, (
+            f"{backend} is not recognized, "
+            f"available backends are {AVAILABLE_BACKENDS}"
+        )
+
+        if track_memory is None:
+            # https://github.com/erfanzar/EasyDeL/pull/100/commits/523ce7b1515d7896d456759d0bcd0bd02369bd10
+            print(
+                termcolor.colored("Information : ", color="red", force_color=True),
+                termcolor.colored(
+                    "track_memory is set to False by default inorder make make training faster. "
+                    "you can turn it on with just passing `track_memory=True` in TrainArguments",
+                    color="white", force_color=True
+                )
+            )
+            track_memory = False
 
         available_backends = len(jax.devices(backend))
-        total_batch_size *= gradient_accumulation_steps
-        array_devices = jnp.ones((available_backends, 1)).reshape(sharding_array)
-        JaxDistributedConfig.initialize(jax_distributed_config)
+        if force_batch_and_gradient_accumulation_steps_calculation:
+            total_batch_size *= gradient_accumulation_steps  # Changed and will be handled inside FJFormer
 
+        array_devices = jnp.ones((available_backends, 1)).reshape(sharding_array)
+
+        JaxDistributedConfig.initialize(jax_distributed_config)
+        self.force_batch_and_gradient_accumulation_steps_calculation = (
+            force_batch_and_gradient_accumulation_steps_calculation
+        )
         self.available_backends = available_backends
         self.array_devices_shape = array_devices.shape
-        self.model_id = model_id
+        self.model_huggingface_repo_id = model_huggingface_repo_id
         self.num_train_epochs = num_train_epochs
         self.wandb_entity = wandb_entity
         self.total_batch_size = total_batch_size
-        self.max_steps = max_steps
+        self.max_training_steps = max_training_steps
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.extra_optimizer_kwargs = extra_optimizer_kwargs
         self.learning_rate = learning_rate
         self.learning_rate_end = learning_rate_end
         self.weight_decay = weight_decay
+        self.label_smoothing_factor = label_smoothing_factor
+        self.z_loss = z_loss
         self.model_name = model_name
         self.gradient_checkpointing = gradient_checkpointing
-        self.max_length = max_length
+        self.max_sequence_length = max_sequence_length
         self.sharding_array = sharding_array
         self.is_fine_tuning = is_fine_tuning
         self.do_train = do_train
         self.do_eval = do_eval
         self.do_test = do_test
+        self.train_on_inputs = train_on_inputs
         self.save_steps = save_steps
         self.save_dir = save_dir
+        self.save_total_limit = save_total_limit
         self.use_pjit_attention_force = use_pjit_attention_force
         self.dtype = dtype
         self.warmup_steps = warmup_steps
@@ -216,7 +272,7 @@ class TrainArguments(
         self.ids_to_pop_from_dataset = ids_to_pop_from_dataset
         self.remove_ckpt_after_load = remove_ckpt_after_load
         self.model_class = model_class
-        self.configs_to_init_model_class = configs_to_init_model_class
+        self.configs_to_initialize_model_class = configs_to_initialize_model_class
         self.do_last_save = do_last_save
         self.model_parameters = model_parameters
         self.do_shard_fns = do_shard_fns
@@ -225,14 +281,14 @@ class TrainArguments(
         self.loss_chunk = loss_chunk
         self.loss_re_mat = loss_re_mat
         self.init_input_shape = init_input_shape
-        self.is_left_padded = is_left_padded
+        self.truncation_mode = truncation_mode
         self.step_partition_spec = step_partition_spec
         self.jax_distributed_config = jax_distributed_config
         self.log_all_workers = log_all_workers
         self.dataloader_num_workers = dataloader_num_workers
         self.dataloader_pin_memory = dataloader_pin_memory
         self.save_optimizer_state = save_optimizer_state
-        self.step_start_point = step_start_point
+        self.step_start_point = step_start_point if step_start_point is not None else 0
         self.verbose = verbose
         self.offload_device = offload_device
         self.optimizer_kwargs = dict(
@@ -244,11 +300,28 @@ class TrainArguments(
             warmup_steps=self.warmup_steps,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
             weight_decay=self.weight_decay,
-            steps=self.max_steps,
+            steps=self.max_training_steps,
         )
-        self.training_time = self._time_to_seconds(
-            training_time) if training_time is not None else None
+        self.training_time = self._time_to_seconds(training_time) if training_time is not None else None
         torch.set_default_device("cpu")
+        self.merge_lora_rapture_parameters = merge_lora_rapture_parameters
+        self.rapture = None
+        self.rapture_config = None
+        self.remove_unused_columns = remove_unused_columns
+        self.state_apply_fn_kwarguments_to_model = (
+            state_apply_fn_kwarguments_to_model
+        ) if state_apply_fn_kwarguments_to_model is not None else {}
+        if rapture_config is not None:
+            print(
+                termcolor.colored("Warning : ", color="red", force_color=True),
+                termcolor.colored(
+                    "You are using LoRA (Low-Rank Adaptation of Large Language Models) and this feature is"
+                    "still in Beta mode so it might act unexpected", color="red", force_color=True
+                )
+            )
+            self.rapture_config = rapture_config
+            self.rapture = XRapTure(config=rapture_config)
+
         self.__dict__.update(**kwargs)
 
     @staticmethod

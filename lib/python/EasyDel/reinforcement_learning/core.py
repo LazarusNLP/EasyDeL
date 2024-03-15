@@ -4,7 +4,6 @@ from contextlib import contextmanager
 import jax
 import numpy as np
 import jax.numpy as jnp
-from transformers import top_k_top_p_filtering
 
 try:
     from collections.abc import Mapping
@@ -40,12 +39,37 @@ def convert_to_scalar(stats):
     return tensorboard_stats
 
 
-def pad_sequence(sequences, batch_first=False, padding_value=0):
-    max_len = max(len(seq) for seq in sequences)
+def pad_sequence(
+        sequences,
+        batch_first=False,
+        padding_value=0,
+        max_len: int | None = None
+):
+    max_len = max(seq.shape[-1] for seq in sequences) if max_len is None else max_len
+    padding_value = jnp.array(padding_value).reshape(1)
     if batch_first:
-        padded_seqs = [seq + [padding_value] * (max_len - len(seq)) for seq in sequences]
+        padded_seqs = [
+            jnp.concatenate(
+                [
+                    seq.reshape(1, -1),
+                    jnp.ones((1, max_len - seq.shape[-1])) * padding_value
+                ],
+                axis=1
+            ) if seq.shape[-1] < max_len else seq.reshape(1, -1)
+            for seq in sequences
+        ]
     else:
-        padded_seqs = [seq + [padding_value] * (max_len - len(seq)) for seq in sequences]
+        padded_seqs = [
+            jnp.concatenate(
+                [
+                    jnp.ones((1, max_len - seq.shape[-1])) * padding_value,
+                    seq.reshape(1, -1)
+                ],
+                axis=1
+            ) if seq.shape[-1] < max_len else seq.reshape(1, -1)
+            for seq in sequences
+        ]
+
     return jnp.array(padded_seqs)
 
 
@@ -190,6 +214,7 @@ def multinomial(logits, num_samples: int, replacement: bool = False):
 
 
 def respond_to_batch(model, queries, txt_len=20, top_k=0, top_p=1.0):
+    raise NotImplementedError("! respond_to_batch is not use able create an issue in github.")
     input_ids = queries
     for i in range(txt_len):
         outputs = model(input_ids)
