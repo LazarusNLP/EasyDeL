@@ -65,9 +65,11 @@ def get_optimizer_and_scheduler(
         elif scheduler == EasyDelSchedulers.WARM_UP_COSINE:
             tx, sc = fjformer.optimizers.get_adafactor_with_warm_up_cosine_scheduler(
                 learning_rate=learning_rate,
+                learning_rate_end=learning_rate_end,
                 steps=steps,
                 weight_decay=weight_decay,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+                warmup_steps=warmup_steps,
                 **extra_optimizer_kwargs
             )
         elif scheduler == EasyDelSchedulers.WARM_UP_LINEAR:
@@ -112,8 +114,10 @@ def get_optimizer_and_scheduler(
         elif scheduler == EasyDelSchedulers.WARM_UP_COSINE:
             tx, sc = fjformer.optimizers.get_lion_with_warm_up_cosine_scheduler(
                 learning_rate=learning_rate,
+                learning_rate_end=learning_rate_end,
                 steps=steps,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+                warmup_steps=warmup_steps,
                 **extra_optimizer_kwargs
             )
 
@@ -157,9 +161,11 @@ def get_optimizer_and_scheduler(
         elif scheduler == EasyDelSchedulers.WARM_UP_COSINE:
             tx, sc = fjformer.optimizers.get_adamw_with_warm_up_cosine_scheduler(
                 learning_rate=learning_rate,
+                learning_rate_end=learning_rate_end,
                 steps=steps,
                 weight_decay=weight_decay,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+                warmup_steps=warmup_steps,
                 **extra_optimizer_kwargs
             )
         elif scheduler == EasyDelSchedulers.WARM_UP_LINEAR:
