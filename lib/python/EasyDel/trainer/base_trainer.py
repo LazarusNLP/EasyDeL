@@ -275,14 +275,22 @@ class BaseTrainer:
                 max_sequence_length=self.arguments.max_sequence_length,
                 truncation_mode=self.arguments.truncation_mode
             ),
-            batch_size=self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps,
+            batch_size=(
+                self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps
+                if self.arguments.force_batch_and_gradient_accumulation_steps_calculation
+                else self.arguments.total_batch_size
+            ),
             drop_last=True,
         )
         max_training_steps = (
-            self.arguments.num_train_epochs * len(dataloader_train) // self.arguments.gradient_accumulation_steps
+            self.arguments.num_train_epochs * len(dataloader_train)
             if self.arguments.max_training_steps is None
             else self.arguments.max_training_steps
         )
+
+        if self.arguments.force_batch_and_gradient_accumulation_steps_calculation:
+            max_training_steps //= self.arguments.gradient_accumulation_steps
+
         if self.dataset_eval is not None and self.arguments.do_eval:
             dataloader_eval = DataLoader(
                 self.dataset_eval,
@@ -290,14 +298,20 @@ class BaseTrainer:
                     max_sequence_length=self.arguments.max_sequence_length,
                     truncation_mode=self.arguments.truncation_mode
                 ),
-                batch_size=self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps,
-                drop_last=True
+                batch_size=(
+                    self.arguments.total_batch_size // self.arguments.gradient_accumulation_steps
+                    if self.arguments.force_batch_and_gradient_accumulation_steps_calculation
+                    else self.arguments.total_batch_size
+                ),
+                drop_last=True,
             )
             max_evaluation_steps = (
-                len(dataloader_eval) // self.arguments.gradient_accumulation_steps
+                len(dataloader_eval)
                 if self.arguments.max_training_steps is None
                 else self.arguments.max_training_steps
             )
+            if self.arguments.force_batch_and_gradient_accumulation_steps_calculation:
+                max_evaluation_steps //= self.arguments.gradient_accumulation_steps
         else:
             dataloader_eval, max_evaluation_steps = None, 0
 
